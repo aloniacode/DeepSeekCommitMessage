@@ -1,0 +1,127 @@
+{
+  "name": "deepseek-commit-message",
+  "displayName": "Deepseek Commit Message",
+  "description": "使用 DeepSeek 根据当前工作区的 git 变更自动生成符合 Conventional Commits 规范的 commit message，摆脱对 Copilot 的依赖。",
+  "version": "0.0.1",
+  "publisher": "alonia",
+  "icon": "src/assets/logo-128x128.png",
+  "license": "MIT",
+  "packageManager": "pnpm@11.21.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aloniacode/DeepSeekCommitMessage"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "commit",
+    "commit message",
+    "deepseek",
+    "conventional commits",
+    "git"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseekCommitMessage.setApiKey",
+        "category": "DeepSeek Commit Message",
+        "title": "Set API Key"
+      },
+      {
+        "command": "deepseekCommitMessage.clearApiKey",
+        "category": "DeepSeek Commit Message",
+        "title": "Clear API Key"
+      },
+      {
+        "command": "deepseekCommitMessage.selectModel",
+        "category": "DeepSeek Commit Message",
+        "title": "Select Model"
+      },
+      {
+        "command": "deepseekCommitMessage.setPrompt",
+        "category": "DeepSeek Commit Message",
+        "title": "Set Prompt"
+      },
+      {
+        "command": "deepseekCommitMessage.generateCommitMessage",
+        "category": "DeepSeek Commit Message",
+        "title": "✨ Generate Commit Message",
+        "icon": {
+          "light": "src/assets/logo.svg",
+          "dark": "src/assets/logo.svg"
+        }
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "deepseekCommitMessage.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DeepSeek Commit Message",
+      "properties": {
+        "deepseekCommitMessage.model": {
+          "type": "string",
+          "enum": [
+            "pro",
+            "flash"
+          ],
+          "enumDescriptions": [
+            "Pro：deepseek-v4-pro，推理能力更强，适合复杂改动",
+            "Flash：deepseek-v4-flash，速度更快、成本更低，适合日常提交"
+          ],
+          "default": "flash",
+          "description": "生成 commit message 使用的 DeepSeek 模型。",
+          "order": 1
+        },
+        "deepseekCommitMessage.promptTemplate": {
+          "type": "string",
+          "enum": [
+            "conventional",
+            "conventional-zh",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Conventional Commits（英文，默认）",
+            "Conventional Commits（中文）",
+            "自定义提示词（使用下方 prompt 配置项的内容）"
+          ],
+          "default": "conventional",
+          "description": "生成 commit message 的预设提示词模板。",
+          "order": 2
+        },
+        "deepseekCommitMessage.prompt": {
+          "type": "string",
+          "default": "",
+          "description": "自定义提示词（当 promptTemplate 选择 custom 时生效）。留空则回退到内置的 Conventional Commits 模板。",
+          "order": 3
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p ./",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.3.3"
+  }
+}

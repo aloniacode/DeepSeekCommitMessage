@@ -1,0 +1,7 @@
+# pnpm 配置（pnpm 11 起，构建脚本审批统一在此声明）
+allowBuilds:
+  # keytar 仅在 `vsce login` 保存 PAT 到系统钥匙串时用到，且需要原生编译，
+  # 打包（vsce package）不需要它，故不构建。
+  keytar: false
+  # vsce 打包时需要 vsce-sign 给 vsix 签名，允许其运行构建脚本。
+  "@vscode/vsce-sign": true

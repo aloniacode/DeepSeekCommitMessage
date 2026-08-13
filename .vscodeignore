@@ -1,0 +1,17 @@
+.vscode/**
+.vscode-test/**
+.workbuddy/**
+.git/**
+.gitignore
+.gitattributes
+src/**
+!src/assets/logo.svg
+!src/assets/logo-128x128.png
+node_modules/**
+**/*.map
+**/*.ts
+*.vsix
+pnpm-lock.yaml
+pnpm-workspace.yaml
+_tmp_*
+tsconfig.json
