@@ -4,6 +4,7 @@
 .git/**
 .gitignore
 .gitattributes
+CONTRIBUTING.md
 src/**
 !src/assets/logo.svg
 !src/assets/logo-128x128.png
