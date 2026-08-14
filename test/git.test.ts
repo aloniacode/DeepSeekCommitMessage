@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import { isBinaryFile, collectUntrackedContents } from "../src/git";
+import { isBinaryFile, collectUntrackedContents, stripDiffMetadata, isExcludedPath } from "../src/git";
 
 async function makeTmp(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "dcm-test-"));
@@ -68,5 +68,54 @@ describe("collectUntrackedContents", () => {
     const dir = await makeTmp();
     expect(await collectUntrackedContents(dir, [])).toBe("");
     await clean(dir);
+  });
+});
+
+describe("stripDiffMetadata", () => {
+  it("去除 diff --git / index / mode / similarity 元数据行", () => {
+    const input = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "index 1234567..abcdef0 100644",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1,3 +1,3 @@",
+      "-old",
+      "+new",
+      "diff --git a/src/b.ts b/src/b.ts",
+      "new file mode 100644",
+      "index 0000000..1111111 100644",
+      "--- /dev/null",
+      "+++ b/src/b.ts",
+    ].join("\n");
+
+    const out = stripDiffMetadata(input);
+    expect(out).not.toContain("diff --git");
+    expect(out).not.toContain("index ");
+    expect(out).not.toContain("new file mode");
+    // 保留 hunk 头与增删行
+    expect(out).toContain("@@ -1,3 +1,3 @@");
+    expect(out).toContain("-old");
+    expect(out).toContain("+new");
+  });
+
+  it("无元数据行时原样保留", () => {
+    const input = "@@ -1 +1 @@\n-foo\n+bar";
+    expect(stripDiffMetadata(input)).toBe(input);
+  });
+});
+
+describe("isExcludedPath", () => {
+  it("识别锁文件与压缩产物", () => {
+    expect(isExcludedPath("package-lock.json")).toBe(true);
+    expect(isExcludedPath("pnpm-lock.yaml")).toBe(true);
+    expect(isExcludedPath("dist/app.min.js")).toBe(true);
+    expect(isExcludedPath("assets/style.min.css")).toBe(true);
+    expect(isExcludedPath("src/lib.js.map")).toBe(true);
+  });
+
+  it("普通源码不排除", () => {
+    expect(isExcludedPath("src/index.ts")).toBe(false);
+    expect(isExcludedPath("README.md")).toBe(false);
+    expect(isExcludedPath("foo.lock.ts")).toBe(false);
   });
 });

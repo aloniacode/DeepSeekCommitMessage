@@ -39,6 +39,24 @@ const MAX_UNTRACKED_FILES = 30;
 const MAX_UNTRACKED_TOTAL_BYTES = 200 * 1024;
 const MAX_UNTRACKED_FILE_BYTES = 64 * 1024;
 
+/**
+ * diff 采集时排除的文件模式（对 commit message 价值低且体积大）：
+ * 各类锁文件、压缩产物、sourcemap。用于节省 token。
+ */
+const EXCLUDED_DIFF_PATHS = [
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lockb",
+  "composer.lock",
+  "Gemfile.lock",
+  "Cargo.lock",
+  "poetry.lock",
+  "*.min.js",
+  "*.min.css",
+  "*.map",
+];
+
 /** 执行一条 git 命令，返回结构化结果（stdout + 是否成功）。 */
 async function runGit(cwd: string, ...args: string[]): Promise<GitResult> {
   try {
@@ -138,13 +156,48 @@ export async function collectUntrackedContents(
   return parts.join("\n\n");
 }
 
+/** 将排除模式转为 git pathspec 的 exclude 写法。 */
+function buildExcludeSpecs(): string[] {
+  return EXCLUDED_DIFF_PATHS.map((p) => `:(exclude)${p}`);
+}
+
+/** 判断相对路径是否命中排除模式（支持 `*` 通配）。 */
+export function isExcludedPath(rel: string): boolean {
+  return EXCLUDED_DIFF_PATHS.some((pattern) => {
+    const re = new RegExp(
+      "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"
+    );
+    return re.test(rel);
+  });
+}
+
+/** 去除 diff 中对生成 commit message 无用的元数据行，进一步节省 token。 */
+export function stripDiffMetadata(diff: string): string {
+  return diff
+    .split("\n")
+    .filter((line) => {
+      if (/^diff --git /.test(line)) return false;
+      if (/^index [0-9a-f]+\.\.[0-9a-f]+/.test(line)) return false;
+      if (/^(new file mode|deleted file mode|old mode|new mode) /.test(line)) {
+        return false;
+      }
+      if (/^similarity index /.test(line)) return false;
+      return true;
+    })
+    .join("\n");
+}
+
 /** 收集 staged / unstaged 变更及未跟踪文件内容，拼接成一段 diff 文本。 */
 export async function collectChanges(
   cwd: string,
   maxChars: number
 ): Promise<ChangeCollection> {
-  const staged = await runGit(cwd, "diff", "--cached");
-  const unstaged = await runGit(cwd, "diff");
+  const excludeSpecs = buildExcludeSpecs();
+  // -U1 将默认 3 行上下文降为 1 行；--minimal 让 git 生成更精简的 diff
+  const diffArgs = ["-U1", "--minimal", "--", ...excludeSpecs];
+
+  const staged = await runGit(cwd, "diff", "--cached", ...diffArgs);
+  const unstaged = await runGit(cwd, "diff", ...diffArgs);
   const untracked = await runGit(cwd, "ls-files", "--others", "--exclude-standard");
 
   const parts: string[] = [];
@@ -154,14 +207,21 @@ export async function collectChanges(
     }
   };
 
-  push("===== STAGED CHANGES (git diff --cached) =====", staged.ok ? staged.stdout : "");
-  push("===== UNSTAGED CHANGES (git diff) =====", unstaged.ok ? unstaged.stdout : "");
+  push(
+    "===== STAGED CHANGES =====",
+    staged.ok ? stripDiffMetadata(staged.stdout) : ""
+  );
+  push(
+    "===== UNSTAGED CHANGES =====",
+    unstaged.ok ? stripDiffMetadata(unstaged.stdout) : ""
+  );
 
   const untrackedList = untracked.ok
     ? untracked.stdout
         .split(/\r?\n/)
         .map((s) => s.trim())
         .filter(Boolean)
+        .filter((rel) => !isExcludedPath(rel))
     : [];
   if (untrackedList.length > 0) {
     push("===== UNTRACKED FILES =====", untrackedList.join("\n"));
@@ -175,9 +235,11 @@ export async function collectChanges(
   let truncated = false;
   if (diff.length > maxChars) {
     truncated = true;
+    // 超预算时：截断正文 + 附加全量变更统计，让模型既有细节又有全貌
+    const stat = await collectStatSummary(cwd, excludeSpecs);
     diff =
       diff.slice(0, maxChars) +
-      `\n\n[注意：变更内容过大，已截断，仅展示前 ${maxChars} 字符。请结合文件变更自行判断。]`;
+      `\n\n[注意：变更内容过大，已截断。以下为全部变更的文件统计：]\n${stat}`;
   }
 
   return {
@@ -185,6 +247,31 @@ export async function collectChanges(
     hasChanges: parts.length > 0,
     truncated,
   };
+}
+
+/** 用 `git diff --stat` 生成简短的文件级变更统计，作为超大 diff 的兜底摘要。 */
+async function collectStatSummary(
+  cwd: string,
+  excludeSpecs: string[]
+): Promise<string> {
+  const stagedStat = await runGit(
+    cwd,
+    "diff",
+    "--cached",
+    "--stat",
+    "--",
+    ...excludeSpecs
+  );
+  const unstagedStat = await runGit(cwd, "diff", "--stat", "--", ...excludeSpecs);
+
+  const parts: string[] = [];
+  if (stagedStat.ok && stagedStat.stdout.trim()) {
+    parts.push(`Staged:\n${stagedStat.stdout.trim()}`);
+  }
+  if (unstagedStat.ok && unstagedStat.stdout.trim()) {
+    parts.push(`Unstaged:\n${unstagedStat.stdout.trim()}`);
+  }
+  return parts.join("\n\n") || "(无法获取变更统计)";
 }
 
 /** 解析当前要操作的工作区目录（优先活动编辑器所在目录，其次首个工作区目录）。 */

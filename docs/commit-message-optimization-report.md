@@ -136,17 +136,17 @@
 - **为可测性做的重构**：
   - `sanitizeCommitMessage` / `isConventionalSubject` 抽到 `src/message.ts`（纯函数，无 vscode 依赖）。
   - `deepseek.ts` 导出 `isRetryable` / `isRetryableStatus` / `isContextOverflow` / `extractError` / `backoffMs`。
-  - `git.ts` 导出 `isBinaryFile` / `collectUntrackedContents`。
-- **测试覆盖（37 用例）**：
+  - `git.ts` 导出 `isBinaryFile` / `collectUntrackedContents` / `stripDiffMetadata` / `isExcludedPath`。
+- **测试覆盖（41 用例）**：
 
 | 文件 | 覆盖点 |
 | --- | --- |
 | `test/message.test.ts`（10） | 围栏去除、中英文前言剥离、body 保留、空输入、主题行校验 |
 | `test/deepseek.test.ts`（16） | 重试判定、状态码分类、上下文超限识别、错误体解析、退避封顶 |
-| `test/git.test.ts`（7） | 二进制识别（NUL）、未跟踪文件内容采集、按行加前缀、跳过二进制 |
+| `test/git.test.ts`（11） | 二进制识别（NUL）、未跟踪文件内容采集、按行加前缀、跳过二进制、diff 元数据清理、排除路径匹配 |
 | `test/configuration.test.ts`（4） | 配置 getter 默认值/自定义值/非法值回退/取整 |
 
-- **结果**：`pnpm test` 37/37 通过，`pnpm compile` 通过。
+- **结果**：`pnpm test` 41/41 通过，`pnpm compile` 通过。
 
 ---
 
@@ -156,3 +156,21 @@
 2. **模型名硬编码**：`deepseek-v4-pro` / `deepseek-v4-flash` 若被 API 拒绝（400 invalid model），现已能被 400 友好提示捕获，但无「回退到另一模型」的自动切换，可作为后续增强。
 3. **`max_tokens=1024`**：pro 推理模型的 reasoning 可能占用较多 token 导致正文截断，现已通过 `truncated` 检测提示，后续可考虑对 pro 调大或做成配置。
 4. **未跟踪文件内容采集有上限**（30 文件/200KB），超大新增文件仍会退化为只列文件名，属合理取舍。
+
+---
+
+## 八、diff 压缩优化（节省 token）
+
+在原有 `maxDiffChars` 粗暴截断的基础上，进一步压缩发送给模型的 diff 体积，从源头节省 token（`git.ts`）：
+
+| 措施 | 实现 | 节省效果 |
+| --- | --- | --- |
+| 减少上下文行 | `git diff -U1`（默认 3 行 → 1 行）+ `--minimal`（最小 diff） | 约 30%–50% |
+| 排除低价值大文件 | pathspec `:(exclude)…` 排除各类锁文件、`*.min.js`、`*.min.css`、`*.map` | 锁文件变更时省数十 KB |
+| 清理元数据行 | `stripDiffMetadata` 去除 `diff --git` / `index` / `*file mode` / `similarity index` 行 | 约 5%–10% |
+| 超预算降级为摘要 | 超过 `maxDiffChars` 时截断正文 + 附加 `git diff --stat` 文件级统计 | 保留全貌而非硬截断 |
+
+- 锁文件清单：`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lockb`、`composer.lock`、`Gemfile.lock`、`Cargo.lock`、`poetry.lock`、`*.min.js`、`*.min.css`、`*.map`。
+- 未跟踪文件同样按排除清单过滤，避免重复采集锁文件内容。
+- 已在隔离 git 仓库中实测：pathspec `:(exclude)` 的明确文件名与通配符 `*` 均正确生效，`-U1 --minimal` 语法正常。
+- 新增 `stripDiffMetadata` / `isExcludedPath` 的单元测试。
