@@ -4,6 +4,9 @@ import {
   getModel,
   getPrompt,
   getPromptTemplate,
+  getMaxDiffChars,
+  getMaxRetries,
+  getRequestTimeoutMs,
   MODEL_IDS,
   MODEL_LABELS,
   deleteApiKey,
@@ -22,34 +25,38 @@ import {
   collectChanges,
   fillScmInputBox,
   getRepoRoot,
+  isGitAvailable,
   isGitRepository,
   resolveWorkspaceFolder,
 } from "./git";
-
-/** 清理模型返回的文本：去掉 markdown 代码围栏、前后空白。 */
-function sanitizeCommitMessage(raw: string): string {
-  let text = raw.trim();
-  // 去除包裹的 ``` 或 ```markdown 围栏
-  text = text.replace(/^```(?:[a-zA-Z0-9_-]*)?\s*/g, "");
-  text = text.replace(/\s*```$/g, "");
-  return text.trim();
-}
+import { sanitizeCommitMessage } from "./message";
 
 /** 将 DeepSeek 调用异常转换为友好的中文提示。 */
 function friendlyError(err: unknown): string {
   if (err instanceof DeepSeekError) {
+    if (err.message === "已取消。") {
+      return "已取消生成。";
+    }
     switch (err.statusCode) {
+      case 400:
+        return err.message.includes("上下文")
+          ? err.message
+          : `请求参数有误（HTTP 400）：${err.message}`;
       case 401:
         return "DeepSeek API Key 无效或未授权，请重新设置 API Key。";
       case 402:
         return "DeepSeek 账户余额不足，请充值后重试。";
+      case 403:
+        return "请求被拒绝（HTTP 403），请检查账号权限或所在地区是否可用。";
+      case 408:
+        return "请求超时，请稍后重试或调大超时时间。";
       case 429:
-        return "请求过于频繁或并发超限，请稍后重试。";
+        return "请求过于频繁或并发超限，已自动重试，若仍失败请稍后重试。";
       case 500:
       case 502:
       case 503:
       case 504:
-        return "DeepSeek 服务暂时不可用，请稍后重试。";
+        return "DeepSeek 服务暂时不可用，已自动重试，若仍失败请稍后重试。";
       default:
         return err.statusCode
           ? `生成失败（HTTP ${err.statusCode}）：${err.message}`
@@ -218,35 +225,55 @@ async function generateCommitMessage(): Promise<void> {
     return;
   }
 
-  // 3. 校验 git 仓库
+  // 3. 校验 git 环境与仓库
+  if (!(await isGitAvailable(cwd))) {
+    vscode.window.showErrorMessage(
+      "未检测到 git 命令，请先安装 git 并确保其已加入 PATH。"
+    );
+    return;
+  }
   if (!(await isGitRepository(cwd))) {
     vscode.window.showErrorMessage("当前工作区不是 git 仓库。");
     return;
   }
 
-  // 4. 收集变更
-  const { diff, hasChanges } = await collectChanges(cwd);
+  // 4. 收集变更（带截断上限，避免超出模型上下文）
+  const { diff, hasChanges, truncated } = await collectChanges(
+    cwd,
+    getMaxDiffChars()
+  );
   if (!hasChanges) {
     vscode.window.showInformationMessage(
       "当前没有 staged 或 unstaged 的变更。"
     );
     return;
   }
+  if (truncated) {
+    vscode.window.showWarningMessage(
+      "变更内容过大，已自动截断后生成，commit message 可能不够精确，建议分批提交。"
+    );
+  }
 
-  // 5. 调用 DeepSeek 生成
+  // 5. 调用 DeepSeek 生成（可取消 + 自动重试）
   const model = MODEL_IDS[getModel()];
   const prompt = getPrompt();
+  const controller = new AbortController();
 
-  let message: string;
+  let result: { content: string; truncated: boolean };
   try {
-    await vscode.window.withProgress(
+    result = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: "正在生成 commit message…",
-        cancellable: false,
+        title: "正在生成 commit message…（点击可取消）",
+        cancellable: true,
       },
-      async () => {
-        message = await callDeepSeek(apiKey, model, prompt, diff);
+      async (_progress, token) => {
+        token.onCancellationRequested(() => controller.abort());
+        return await callDeepSeek(apiKey, model, prompt, diff, {
+          timeoutMs: getRequestTimeoutMs(),
+          maxRetries: getMaxRetries(),
+          signal: controller.signal,
+        });
       }
     );
   } catch (err) {
@@ -254,13 +281,24 @@ async function generateCommitMessage(): Promise<void> {
     return;
   }
 
-  const clean = sanitizeCommitMessage(message!);
+  const clean = sanitizeCommitMessage(result.content);
 
-  // 6. 填充到 SCM 输入框
+  // 6. 结果兜底校验：清洗后为空或不符合规范时给出提示
+  if (!clean) {
+    vscode.window.showErrorMessage(
+      "模型返回内容无法解析为 commit message，请重试或切换到 pro 模型。"
+    );
+    return;
+  }
+
+  // 7. 填充到 SCM 输入框
   const repoRoot = await getRepoRoot(cwd);
   const filled = await fillScmInputBox(clean, repoRoot);
   if (filled) {
-    vscode.window.showInformationMessage("Commit message 已生成并填充到输入框。");
+    const extra = result.truncated ? "（模型输出可能因长度被截断）" : "";
+    vscode.window.showInformationMessage(
+      `Commit message 已生成并填充到输入框。${extra}`
+    );
   } else {
     // 兜底：复制到剪贴板，方便手动粘贴
     await vscode.env.clipboard.writeText(clean);

@@ -67,6 +67,15 @@ export const PROMPT_TEMPLATES: Record<PromptTemplateId, string> = {
   custom: "",
 };
 
+/** 默认请求超时（毫秒）。 */
+export const DEFAULT_TIMEOUT_MS = 120_000;
+
+/** 默认最大重试次数（不含首次请求）。 */
+export const DEFAULT_MAX_RETRIES = 2;
+
+/** 默认 diff 采集上限（字符数），超出后截断以适配模型上下文。 */
+export const DEFAULT_MAX_DIFF_CHARS = 40_000;
+
 /** 获取扩展的配置对象。 */
 export function getConfig(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(CONFIG_SECTION);
@@ -156,4 +165,24 @@ export async function setPromptTemplate(
 /** 将自定义提示词写入配置。 */
 export async function setPrompt(prompt: string): Promise<void> {
   await getConfig().update("prompt", prompt, vscode.ConfigurationTarget.Global);
+}
+
+/** 读取请求超时（毫秒），非法值回退默认。 */
+export function getRequestTimeoutMs(): number {
+  const value = getConfig().get<number>("requestTimeout", DEFAULT_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_TIMEOUT_MS;
+}
+
+/** 读取最大重试次数，非法值回退默认。 */
+export function getMaxRetries(): number {
+  const value = getConfig().get<number>("maxRetries", DEFAULT_MAX_RETRIES);
+  return Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : DEFAULT_MAX_RETRIES;
+}
+
+/** 读取 diff 采集上限（字符数），非法值回退默认。 */
+export function getMaxDiffChars(): number {
+  const value = getConfig().get<number>("maxDiffChars", DEFAULT_MAX_DIFF_CHARS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_DIFF_CHARS;
 }

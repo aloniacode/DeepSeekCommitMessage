@@ -108,6 +108,28 @@
           "default": "",
           "description": "自定义提示词（当 promptTemplate 选择 custom 时生效）。留空则回退到内置的 Conventional Commits 模板。",
           "order": 3
+        },
+        "deepseekCommitMessage.requestTimeout": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 5000,
+          "description": "DeepSeek 请求超时时间（毫秒）。pro 模型推理较慢，超时建议不低于 60000。",
+          "order": 4
+        },
+        "deepseekCommitMessage.maxRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "遇到瞬时错误（限流、服务端 5xx、网络超时、空返回）时的最大重试次数。",
+          "order": 5
+        },
+        "deepseekCommitMessage.maxDiffChars": {
+          "type": "number",
+          "default": 40000,
+          "minimum": 1000,
+          "description": "发送给模型的 git 变更内容上限（字符数），超出后自动截断，避免超出模型上下文长度导致失败。",
+          "order": 6
         }
       }
     }
@@ -116,12 +138,15 @@
     "vscode:prepublish": "tsc -p ./",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^18.19.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.10"
   }
 }

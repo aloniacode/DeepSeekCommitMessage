@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import * as fs from "fs/promises";
+import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 
@@ -18,62 +20,170 @@ interface GitExtension {
   getAPI(version: 1): GitAPI;
 }
 
-/** 执行一条 git 命令，返回 stdout；命令不存在或失败时返回空串。 */
-async function runGit(
-  cwd: string,
-  ...args: string[]
-): Promise<string> {
+/** git 命令执行结果（不再吞掉错误，便于区分失败原因）。 */
+export interface GitResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+/** 收集到的变更信息。 */
+export interface ChangeCollection {
+  diff: string;
+  hasChanges: boolean;
+  truncated: boolean;
+}
+
+/** 未跟踪文件内容采集上限，防止超大仓库拖垮生成。 */
+const MAX_UNTRACKED_FILES = 30;
+const MAX_UNTRACKED_TOTAL_BYTES = 200 * 1024;
+const MAX_UNTRACKED_FILE_BYTES = 64 * 1024;
+
+/** 执行一条 git 命令，返回结构化结果（stdout + 是否成功）。 */
+async function runGit(cwd: string, ...args: string[]): Promise<GitResult> {
   try {
-    const { stdout } = await execAsync(
-      `git ${args.join(" ")}`,
-      { cwd, maxBuffer: 16 * 1024 * 1024 }
-    );
-    return stdout;
-  } catch {
-    return "";
+    const { stdout, stderr } = await execAsync(`git ${args.join(" ")}`, {
+      cwd,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return { ok: true, stdout, stderr };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    return {
+      ok: false,
+      stdout: e.stdout ?? "",
+      stderr: e.stderr ?? e.message ?? "",
+    };
   }
+}
+
+/** 判断当前环境是否安装了 git。 */
+export async function isGitAvailable(cwd: string): Promise<boolean> {
+  const out = await runGit(cwd, "--version");
+  return out.ok;
 }
 
 /** 判断指定目录是否为 git 仓库。 */
 export async function isGitRepository(cwd: string): Promise<boolean> {
   const out = await runGit(cwd, "rev-parse", "--is-inside-work-tree");
-  return out.trim() === "true";
+  return out.ok && out.stdout.trim() === "true";
 }
 
 /** 获取 git 仓库根目录；失败返回空串。 */
 export async function getRepoRoot(cwd: string): Promise<string> {
   const out = await runGit(cwd, "rev-parse", "--show-toplevel");
-  return out.trim();
+  return out.ok ? out.stdout.trim() : "";
 }
 
-/** 收集 staged / unstaged 变更及未跟踪文件列表，拼接成一段 diff 文本。 */
-export async function collectChanges(cwd: string): Promise<{
-  diff: string;
-  hasChanges: boolean;
-}> {
+/** 判断文件是否为二进制（读取首部 8KB，若含 NUL 字节则视为二进制）。 */
+export async function isBinaryFile(filePath: string): Promise<boolean> {
+  try {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const buf = Buffer.alloc(8192);
+      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+      for (let i = 0; i < bytesRead; i++) {
+        if (buf[i] === 0) {
+          return true;
+        }
+      }
+      return false;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // 读取失败（无权限等）时按二进制跳过，避免拖垮流程
+    return true;
+  }
+}
+
+/** 读取未跟踪的文本文件内容，以「新增文件」形式拼接进 diff，提升新文件场景的生成质量。 */
+export async function collectUntrackedContents(
+  cwd: string,
+  untracked: string[]
+): Promise<string> {
+  const parts: string[] = [];
+  let totalBytes = 0;
+
+  for (const rel of untracked) {
+    if (parts.length >= MAX_UNTRACKED_FILES || totalBytes >= MAX_UNTRACKED_TOTAL_BYTES) {
+      break;
+    }
+    const abs = path.resolve(cwd, rel);
+    if (await isBinaryFile(abs)) {
+      continue;
+    }
+    let stat;
+    try {
+      stat = await fs.stat(abs);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile() || stat.size > MAX_UNTRACKED_FILE_BYTES) {
+      continue;
+    }
+    try {
+      const content = await fs.readFile(abs, "utf8");
+      const prefixed = content
+        .split(/\r?\n/)
+        .map((line) => `+${line}`)
+        .join("\n");
+      parts.push(`===== NEW FILE (untracked): ${rel} =====\n${prefixed}`);
+      totalBytes += stat.size;
+    } catch {
+      // 忽略单个文件读取失败
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+/** 收集 staged / unstaged 变更及未跟踪文件内容，拼接成一段 diff 文本。 */
+export async function collectChanges(
+  cwd: string,
+  maxChars: number
+): Promise<ChangeCollection> {
   const staged = await runGit(cwd, "diff", "--cached");
   const unstaged = await runGit(cwd, "diff");
-  const untracked = await runGit(
-    cwd,
-    "ls-files",
-    "--others",
-    "--exclude-standard"
-  );
+  const untracked = await runGit(cwd, "ls-files", "--others", "--exclude-standard");
 
   const parts: string[] = [];
-  if (staged.trim()) {
-    parts.push(`===== STAGED CHANGES (git diff --cached) =====\n${staged.trim()}`);
+  const push = (header: string, body: string) => {
+    if (body.trim()) {
+      parts.push(`${header}\n${body.trim()}`);
+    }
+  };
+
+  push("===== STAGED CHANGES (git diff --cached) =====", staged.ok ? staged.stdout : "");
+  push("===== UNSTAGED CHANGES (git diff) =====", unstaged.ok ? unstaged.stdout : "");
+
+  const untrackedList = untracked.ok
+    ? untracked.stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  if (untrackedList.length > 0) {
+    push("===== UNTRACKED FILES =====", untrackedList.join("\n"));
+    const contents = await collectUntrackedContents(cwd, untrackedList);
+    if (contents) {
+      parts.push(contents);
+    }
   }
-  if (unstaged.trim()) {
-    parts.push(`===== UNSTAGED CHANGES (git diff) =====\n${unstaged.trim()}`);
-  }
-  if (untracked.trim()) {
-    parts.push(`===== UNTRACKED FILES =====\n${untracked.trim()}`);
+
+  let diff = parts.join("\n\n");
+  let truncated = false;
+  if (diff.length > maxChars) {
+    truncated = true;
+    diff =
+      diff.slice(0, maxChars) +
+      `\n\n[注意：变更内容过大，已截断，仅展示前 ${maxChars} 字符。请结合文件变更自行判断。]`;
   }
 
   return {
-    diff: parts.join("\n\n"),
+    diff,
     hasChanges: parts.length > 0,
+    truncated,
   };
 }
 
