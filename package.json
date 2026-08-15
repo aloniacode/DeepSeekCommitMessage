@@ -2,7 +2,7 @@
   "name": "deepseek-commit-message",
   "displayName": "Deepseek Commit Message",
   "description": "使用 DeepSeek 根据当前工作区的 git 变更自动生成符合 Conventional Commits 规范的 commit message，摆脱对 Copilot 的依赖。",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "alonia",
   "icon": "src/assets/logo-128x128.png",
   "license": "MIT",
