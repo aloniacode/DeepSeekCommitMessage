@@ -20,6 +20,7 @@ import {
 import {
   generateCommitMessage as callDeepSeek,
   DeepSeekError,
+  type GenerateResult,
 } from "./deepseek";
 import {
   collectChanges,
@@ -30,6 +31,19 @@ import {
   resolveWorkspaceFolder,
 } from "./git";
 import { sanitizeCommitMessage } from "./message";
+import {
+  UsageStore,
+  emptyUsageStats,
+  formatCompactTokenCount,
+  formatTokenCount,
+  formatUsageSummary,
+  type UsageStats,
+} from "./usage";
+
+/** 累计 token 用量存取（按 API Key 哈希分组，跨工作区共享）。 */
+let usageStore: UsageStore | undefined;
+/** 状态栏累计 token 用量展示。 */
+let statusBarItem: vscode.StatusBarItem | undefined;
 
 /** 将 DeepSeek 调用异常转换为友好的中文提示。 */
 function friendlyError(err: unknown): string {
@@ -259,7 +273,7 @@ async function generateCommitMessage(): Promise<void> {
   const prompt = getPrompt();
   const controller = new AbortController();
 
-  let result: { content: string; truncated: boolean };
+  let result: GenerateResult;
   try {
     result = await vscode.window.withProgress(
       {
@@ -279,6 +293,12 @@ async function generateCommitMessage(): Promise<void> {
   } catch (err) {
     vscode.window.showErrorMessage(friendlyError(err));
     return;
+  }
+
+  // 5.5 累计 token 用量：成功响应即计入（重试失败的消耗不估算），并刷新状态栏
+  if (result.usage && usageStore) {
+    const stats = await usageStore.add(apiKey, result.usage);
+    updateStatusBar(stats);
   }
 
   const clean = sanitizeCommitMessage(result.content);
@@ -308,8 +328,86 @@ async function generateCommitMessage(): Promise<void> {
   }
 }
 
+/** 刷新状态栏累计 token 用量（无数据时隐藏）。 */
+function updateStatusBar(stats: UsageStats): void {
+  if (!statusBarItem) {
+    return;
+  }
+  if (stats.totalTokens > 0) {
+    statusBarItem.text = `$(graph) ${formatCompactTokenCount(stats.totalTokens)} tokens`;
+    statusBarItem.tooltip = "累计 token 用量，点击查看明细";
+    statusBarItem.show();
+  } else {
+    statusBarItem.hide();
+  }
+}
+
+/** 依据当前 API Key 初始化状态栏显示。 */
+async function refreshStatusBar(): Promise<void> {
+  if (!usageStore) {
+    return;
+  }
+  const apiKey = await getApiKey();
+  updateStatusBar(apiKey ? await usageStore.get(apiKey) : emptyUsageStats());
+}
+
+/** 命令：查看累计 token 用量。 */
+async function showTokenUsage(): Promise<void> {
+  const apiKey = await getApiKey();
+  if (!apiKey) {
+    vscode.window.showInformationMessage(
+      "尚未配置 API Key，无法统计 token 用量。"
+    );
+    return;
+  }
+  const stats = usageStore ? await usageStore.get(apiKey) : emptyUsageStats();
+  if (stats.totalTokens === 0) {
+    vscode.window.showInformationMessage(
+      "暂无 token 用量数据。每次成功生成 commit message 后会累计记录。"
+    );
+    return;
+  }
+  vscode.window.showInformationMessage(
+    formatUsageSummary(stats, MODEL_LABELS[getModel()])
+  );
+}
+
+/** 命令：重置当前 API Key 的累计 token 用量。 */
+async function resetTokenUsage(): Promise<void> {
+  const apiKey = await getApiKey();
+  if (!apiKey) {
+    vscode.window.showInformationMessage("尚未配置 API Key，无需重置。");
+    return;
+  }
+  const stats = usageStore ? await usageStore.get(apiKey) : emptyUsageStats();
+  if (stats.totalTokens === 0) {
+    vscode.window.showInformationMessage("当前没有累计的 token 用量数据。");
+    return;
+  }
+  const answer = await vscode.window.showWarningMessage(
+    `确定要重置当前 API Key 的累计 token 用量吗？\n已累计 ${formatTokenCount(stats.totalTokens)} tokens，重置后不可恢复。`,
+    { modal: true },
+    "重置"
+  );
+  if (answer !== "重置") {
+    return;
+  }
+  await usageStore?.clear(apiKey);
+  updateStatusBar(emptyUsageStats());
+  vscode.window.showInformationMessage("累计 token 用量已重置。");
+}
+
 /** 注册所有命令。 */
 export function registerCommands(context: vscode.ExtensionContext): void {
+  usageStore = new UsageStore(context.globalState);
+
+  statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100
+  );
+  statusBarItem.command = "deepseekCommitMessage.showTokenUsage";
+  context.subscriptions.push(statusBarItem);
+
   context.subscriptions.push(
     vscode.commands.registerCommand("deepseekCommitMessage.setApiKey", setApiKey),
     vscode.commands.registerCommand(
@@ -324,6 +422,16 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "deepseekCommitMessage.generateCommitMessage",
       generateCommitMessage
+    ),
+    vscode.commands.registerCommand(
+      "deepseekCommitMessage.showTokenUsage",
+      showTokenUsage
+    ),
+    vscode.commands.registerCommand(
+      "deepseekCommitMessage.resetTokenUsage",
+      resetTokenUsage
     )
   );
+
+  void refreshStatusBar();
 }

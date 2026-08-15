@@ -59,6 +59,16 @@
           "light": "src/assets/logo.svg",
           "dark": "src/assets/logo.svg"
         }
+      },
+      {
+        "command": "deepseekCommitMessage.showTokenUsage",
+        "category": "DeepSeek Commit Message",
+        "title": "Show Token Usage"
+      },
+      {
+        "command": "deepseekCommitMessage.resetTokenUsage",
+        "category": "DeepSeek Commit Message",
+        "title": "Reset Token Usage"
       }
     ],
     "menus": {
@@ -73,6 +83,13 @@
     "configuration": {
       "title": "DeepSeek Commit Message",
       "properties": {
+        "deepseekCommitMessage.apiKey": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "（已废弃）API Key 已迁移至系统凭据库（SecretStorage）。此配置项仅用于兼容旧版本的明文密钥自动迁移与清理，请使用命令 Set API Key 管理密钥。",
+          "order": 0
+        },
         "deepseekCommitMessage.model": {
           "type": "string",
           "enum": [

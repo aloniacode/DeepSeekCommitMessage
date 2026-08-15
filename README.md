@@ -16,6 +16,7 @@
 - 🔐 安全存储：API Key 通过命令保存到系统凭据库（SecretStorage），不落盘到 `settings.json`。
 - 🧩 预设模板：内置英文 / 中文两套 Conventional Commits 提示词，也支持自定义。
 - 🧠 双模型：支持 `pro`（deepseek-v4-pro）与 `flash`（deepseek-v4-flash）。
+- 📊 用量统计：累计记录每次成功生成的 token 用量（prompt / completion / reasoning），状态栏常驻显示，命令可查看明细。
 
 ## 快速开始
 
@@ -35,6 +36,8 @@
 | `DeepSeek Commit Message: Select Model` | 选择 pro / flash 模型 |
 | `DeepSeek Commit Message: Set Prompt` | 选择/自定义提示词模板 |
 | `DeepSeek Commit Message: Generate Commit Message` | 生成 commit message 并填充到 SCM 输入框 |
+| `DeepSeek Commit Message: Show Token Usage` | 查看累计 token 用量（状态栏也可点击查看） |
+| `DeepSeek Commit Message: Reset Token Usage` | 重置当前 API Key 的累计 token 用量（需确认） |
 
 ## 配置项
 

@@ -2,6 +2,19 @@
 
 本项目的所有重要变更都会记录在此文件中。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- 累计 token 用量统计：每次成功生成后自动记录 prompt / completion（含 reasoning）/ total token 数，按 API Key 隔离、跨工作区持久化到 `globalState`。
+- 新命令 `DeepSeek Commit Message: Show Token Usage`：查看累计用量明细（仅统计成功响应的用量，不含重试/取消的消耗）。
+- 新命令 `DeepSeek Commit Message: Reset Token Usage`：确认后重置当前 API Key 的累计用量。
+- 状态栏常驻累计 token 总数（紧凑格式，如 `12.3k tokens`），点击可查看明细。
+
+### Fixed
+
+- 修复 Set API Key / Clear API Key 报错「apiKey 不是一个注册的配置」：`package.json` 未注册 `deepseekCommitMessage.apiKey` 导致 `update("apiKey", …)` 被 VSCode 拒绝。已在 `contributes.configuration` 注册该键（仅用于旧版本明文密钥迁移清理，密钥本体仍存于 SecretStorage）。
+
 ## [0.0.1] - 2026-08-13
 
 ### Added

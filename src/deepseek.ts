@@ -1,4 +1,5 @@
 import * as https from "https";
+import { parseTokenUsage, type TokenUsage } from "./usage";
 
 /** DeepSeek OpenAI 兼容接口地址。 */
 const BASE_URL = "https://api.deepseek.com";
@@ -20,12 +21,20 @@ interface ChatCompletionResponse {
     finish_reason?: string;
   }>;
   error?: { message?: string; type?: string; code?: string };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 }
 
 /** 生成结果：content 为文本，truncated 表示模型因 max_tokens 被截断。 */
 export interface GenerateResult {
   content: string;
   truncated: boolean;
+  /** 本次成功响应的 token 用量；API 未返回时缺省。 */
+  usage?: TokenUsage;
 }
 
 /** 生成调用选项。 */
@@ -254,6 +263,7 @@ export async function generateCommitMessage(
       return {
         content: content.trim(),
         truncated: choice?.finish_reason === "length",
+        usage: parseTokenUsage(data.usage),
       };
     } catch (err) {
       if (signal?.aborted) {
