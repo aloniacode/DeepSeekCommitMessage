@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 生成范围默认仅限**暂存区**（staged）变更，避免未暂存/未跟踪内容污染 message；新增配置 `deepseekCommitMessage.changeScope`（`staged` 默认 / `all`）可恢复包含全部变更。
+- 变更内容超过 `maxDiffChars` 上限时，由「整体截断」改为**按文件比例采样**：每个变更文件至少保留一段、diff hunk 保持完整、采样结果确定，并附全量文件统计摘要，不再丢失尾部变更。
+
 ### Added
 
 - 累计 token 用量统计：每次成功生成后自动记录 prompt / completion（含 reasoning）/ total token 数，按 API Key 隔离、跨工作区持久化到 `globalState`。

@@ -145,8 +145,22 @@
           "type": "number",
           "default": 40000,
           "minimum": 1000,
-          "description": "发送给模型的 git 变更内容上限（字符数），超出后自动截断，避免超出模型上下文长度导致失败。",
+          "description": "发送给模型的 git 变更内容上限（字符数），超出后按文件比例采样，避免超出模型上下文长度导致失败。",
           "order": 6
+        },
+        "deepseekCommitMessage.changeScope": {
+          "type": "string",
+          "enum": [
+            "staged",
+            "all"
+          ],
+          "enumDescriptions": [
+            "仅暂存区（默认）：只基于已 git add 的变更生成 commit message",
+            "全部变更：同时包含未暂存修改与未跟踪文件"
+          ],
+          "default": "staged",
+          "description": "生成 commit message 时采集的 git 变更范围。",
+          "order": 7
         }
       }
     }

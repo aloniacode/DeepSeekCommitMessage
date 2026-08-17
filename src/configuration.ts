@@ -73,8 +73,14 @@ export const DEFAULT_TIMEOUT_MS = 120_000;
 /** 默认最大重试次数（不含首次请求）。 */
 export const DEFAULT_MAX_RETRIES = 2;
 
-/** 默认 diff 采集上限（字符数），超出后截断以适配模型上下文。 */
+/** 默认 diff 采集上限（字符数），超出后按比例采样以适配模型上下文。 */
 export const DEFAULT_MAX_DIFF_CHARS = 40_000;
+
+/** 变更采集范围：staged=仅暂存区（默认），all=暂存区+未暂存+未跟踪。 */
+export type ChangeScope = "staged" | "all";
+
+/** 默认变更采集范围。 */
+export const DEFAULT_CHANGE_SCOPE: ChangeScope = "staged";
 
 /** 获取扩展的配置对象。 */
 export function getConfig(): vscode.WorkspaceConfiguration {
@@ -185,4 +191,10 @@ export function getMaxRetries(): number {
 export function getMaxDiffChars(): number {
   const value = getConfig().get<number>("maxDiffChars", DEFAULT_MAX_DIFF_CHARS);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_DIFF_CHARS;
+}
+
+/** 读取变更采集范围，非法值回退默认（仅暂存区）。 */
+export function getChangeScope(): ChangeScope {
+  const value = getConfig().get<ChangeScope>("changeScope", DEFAULT_CHANGE_SCOPE);
+  return value === "all" ? "all" : "staged";
 }

@@ -3,6 +3,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import type { ChangeScope } from "./configuration";
 
 const execAsync = promisify(exec);
 
@@ -31,13 +32,17 @@ export interface GitResult {
 export interface ChangeCollection {
   diff: string;
   hasChanges: boolean;
-  truncated: boolean;
+  /** 变更内容超出预算时是否按比例采样（而非整体截断）。 */
+  sampled: boolean;
 }
 
 /** 未跟踪文件内容采集上限，防止超大仓库拖垮生成。 */
 const MAX_UNTRACKED_FILES = 30;
 const MAX_UNTRACKED_TOTAL_BYTES = 200 * 1024;
 const MAX_UNTRACKED_FILE_BYTES = 64 * 1024;
+
+/** 采样时单个文件的最低下限（字符数）：保证每个变更文件都至少保留一小段。 */
+const MIN_SAMPLE_CHARS_PER_SECTION = 200;
 
 /**
  * diff 采集时排除的文件模式（对 commit message 价值低且体积大）：
@@ -187,73 +192,272 @@ export function stripDiffMetadata(diff: string): string {
     .join("\n");
 }
 
-/** 收集 staged / unstaged 变更及未跟踪文件内容，拼接成一段 diff 文本。 */
+/** 将一份原始 git diff 按 `diff --git` 边界切分为按文件划分的段落。 */
+export function splitDiffIntoSections(raw: string): string[] {
+  if (raw.trim().length === 0) {
+    return [];
+  }
+  const sections: string[] = [];
+  let current: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^diff --git /.test(line)) {
+      if (current.length > 0) {
+        sections.push(current.join("\n"));
+      }
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) {
+    sections.push(current.join("\n"));
+  }
+  return sections;
+}
+
+/** 稳定字符串哈希（djb2），用于确定性采样排序：同一 diff 每次采样结果一致。 */
+function hashString(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  }
+  return h;
+}
+
+/**
+ * 对单个文件的 diff 段落按配额采样：
+ * - 文件头（路径等）始终保留；
+ * - 变更 hunk 按稳定哈希排序后整块选取，尽量覆盖文件各处且不切断 hunk；
+ * - 第一个 hunk（文件头部的变更上下文）尽可能保留。
+ */
+export function sampleSection(text: string, quota: number): string {
+  if (text.length <= quota) {
+    return text;
+  }
+  const lines = text.split("\n");
+  const header: string[] = [];
+  const hunks: string[] = [];
+  let i = 0;
+  while (i < lines.length && !lines[i].startsWith("@@")) {
+    header.push(lines[i]);
+    i++;
+  }
+  let current: string[] = [];
+  const flush = (): void => {
+    if (current.length > 0) {
+      hunks.push(current.join("\n"));
+      current = [];
+    }
+  };
+  for (; i < lines.length; i++) {
+    if (lines[i].startsWith("@@")) {
+      flush();
+    }
+    current.push(lines[i]);
+  }
+  flush();
+
+  const headerText = header.join("\n");
+  if (hunks.length === 0) {
+    // 无 hunk（重命名/二进制/未跟踪内容）：按行边界截断，不切行
+    if (headerText.length <= quota) {
+      return headerText;
+    }
+    const slice = headerText.slice(0, quota);
+    const lastNl = slice.lastIndexOf("\n");
+    if (lastNl > 0) {
+      return slice.slice(0, lastNl);
+    }
+    // 首行本身超配额：保留整行（文件头信息比空输出更有价值）
+    return headerText.split("\n", 1)[0];
+  }
+  if (headerText.length >= quota) {
+    return headerText;
+  }
+
+  const order = hunks
+    .map((h, idx) => ({ idx, size: h.length, key: hashString(h) }))
+    .sort((a, b) => a.key - b.key || a.idx - b.idx);
+
+  const picked: boolean[] = new Array(hunks.length).fill(false);
+  let pickedCount = 0;
+  let used = headerText.length;
+  for (const o of order) {
+    if (used + o.size <= quota) {
+      picked[o.idx] = true;
+      pickedCount++;
+      used += o.size;
+    }
+  }
+
+  // 无论哈希分布如何，尽量保留第一个 hunk
+  if (!picked[0]) {
+    if (used + hunks[0].length <= quota) {
+      picked[0] = true;
+      pickedCount++;
+      used += hunks[0].length;
+    } else if (pickedCount > 0) {
+      // 移除最大的已选 hunk，为第一个 hunk 腾出空间
+      const largestIdx = order
+        .filter((o) => picked[o.idx] && o.idx !== 0)
+        .sort((a, b) => b.size - a.size)[0];
+      if (largestIdx && used - largestIdx.size + hunks[0].length <= quota) {
+        picked[largestIdx.idx] = false;
+        picked[0] = true;
+      }
+    }
+  }
+
+  const parts = [headerText];
+  for (let idx = 0; idx < hunks.length; idx++) {
+    if (picked[idx]) {
+      parts.push(hunks[idx]);
+    }
+  }
+  return parts.join("\n");
+}
+
+/** 按文件大小占比分配预算；每个文件至少保留 MIN_SAMPLE_CHARS_PER_SECTION 字符。 */
+function allocateQuotas(sizes: number[], budget: number): number[] {
+  const n = sizes.length;
+  const total = sizes.reduce((a, b) => a + b, 0);
+  if (total <= budget) {
+    return sizes.slice();
+  }
+  const floor = Math.min(MIN_SAMPLE_CHARS_PER_SECTION, Math.floor(budget / n));
+  const quotas = sizes.map((s) => Math.min(s, floor));
+  let remaining = budget - quotas.reduce((a, b) => a + b, 0);
+  const remainingSizes = sizes.map((s, i) => Math.max(0, s - quotas[i]));
+  const remTotal = remainingSizes.reduce((a, b) => a + b, 0);
+  if (remTotal > 0 && remaining > 0) {
+    const adds = remainingSizes.map((s) => Math.floor((s / remTotal) * remaining));
+    for (let i = 0; i < n; i++) {
+      quotas[i] += adds[i];
+    }
+  }
+  // 取整零头分给最大的文件
+  const leftover = budget - quotas.reduce((a, b) => a + b, 0);
+  if (leftover > 0) {
+    const maxIdx = quotas.indexOf(Math.max(...quotas));
+    quotas[maxIdx] += leftover;
+  }
+  return quotas;
+}
+
+/** 将各文件段落渲染为最终文本；超预算时按文件比例采样。 */
+function renderSections(
+  sections: Array<{ label: string; text: string }>,
+  budget: number
+): string {
+  const quotas = allocateQuotas(
+    sections.map((s) => s.text.length),
+    budget
+  );
+  const parts: string[] = [];
+  let currentLabel = "";
+  for (let i = 0; i < sections.length; i++) {
+    const { label, text } = sections[i];
+    if (label !== currentLabel) {
+      currentLabel = label;
+      parts.push(`===== ${label} CHANGES =====`);
+    }
+    parts.push(sampleSection(text, quotas[i]));
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * 收集变更并拼接成一段 diff 文本。
+ * 默认仅采集暂存区（staged）变更；`scope === "all"` 时额外包含未暂存修改与未跟踪文件。
+ * 超出 `maxChars` 预算时不整体截断，而是按文件比例采样（每个文件至少保留一小段，
+ * hunk 保持完整），并附全量文件统计，让模型既有细节又有全貌。
+ */
 export async function collectChanges(
   cwd: string,
-  maxChars: number
+  maxChars: number,
+  scope: ChangeScope = "staged"
 ): Promise<ChangeCollection> {
   const excludeSpecs = buildExcludeSpecs();
   // -U1 将默认 3 行上下文降为 1 行；--minimal 让 git 生成更精简的 diff
   const diffArgs = ["-U1", "--minimal", "--", ...excludeSpecs];
 
-  const staged = await runGit(cwd, "diff", "--cached", ...diffArgs);
-  const unstaged = await runGit(cwd, "diff", ...diffArgs);
-  const untracked = await runGit(cwd, "ls-files", "--others", "--exclude-standard");
-
-  const parts: string[] = [];
-  const push = (header: string, body: string) => {
-    if (body.trim()) {
-      parts.push(`${header}\n${body.trim()}`);
+  const sections: Array<{ label: string; text: string }> = [];
+  const pushDiff = (label: string, raw: string): void => {
+    for (const section of splitDiffIntoSections(raw)) {
+      const text = stripDiffMetadata(section).trim();
+      if (text) {
+        sections.push({ label, text });
+      }
     }
   };
 
-  push(
-    "===== STAGED CHANGES =====",
-    staged.ok ? stripDiffMetadata(staged.stdout) : ""
-  );
-  push(
-    "===== UNSTAGED CHANGES =====",
-    unstaged.ok ? stripDiffMetadata(unstaged.stdout) : ""
-  );
+  const staged = await runGit(cwd, "diff", "--cached", ...diffArgs);
+  pushDiff("STAGED", staged.ok ? staged.stdout : "");
 
-  const untrackedList = untracked.ok
-    ? untracked.stdout
-        .split(/\r?\n/)
-        .map((s) => s.trim())
+  if (scope === "all") {
+    const unstaged = await runGit(cwd, "diff", ...diffArgs);
+    pushDiff("UNSTAGED", unstaged.ok ? unstaged.stdout : "");
+
+    const untracked = await runGit(
+      cwd,
+      "ls-files",
+      "--others",
+      "--exclude-standard"
+    );
+    const untrackedList = untracked.ok
+      ? untracked.stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .filter((rel) => !isExcludedPath(rel))
+      : [];
+    if (untrackedList.length > 0) {
+      const contents = await collectUntrackedContents(cwd, untrackedList);
+      const blob = [
+        `===== UNTRACKED FILES =====\n${untrackedList.join("\n")}`,
+        contents,
+      ]
         .filter(Boolean)
-        .filter((rel) => !isExcludedPath(rel))
-    : [];
-  if (untrackedList.length > 0) {
-    push("===== UNTRACKED FILES =====", untrackedList.join("\n"));
-    const contents = await collectUntrackedContents(cwd, untrackedList);
-    if (contents) {
-      parts.push(contents);
+        .join("\n\n");
+      if (blob.trim()) {
+        sections.push({ label: "UNTRACKED", text: blob });
+      }
     }
   }
 
-  let diff = parts.join("\n\n");
-  let truncated = false;
-  if (diff.length > maxChars) {
-    truncated = true;
-    // 超预算时：截断正文 + 附加全量变更统计，让模型既有细节又有全貌
-    const stat = await collectStatSummary(cwd, excludeSpecs);
-    diff =
-      diff.slice(0, maxChars) +
-      `\n\n[注意：变更内容过大，已截断。以下为全部变更的文件统计：]\n${stat}`;
+  if (sections.length === 0) {
+    return { diff: "", hasChanges: false, sampled: false };
   }
 
+  const totalChars = sections.reduce((sum, s) => sum + s.text.length, 0);
+  if (totalChars <= maxChars) {
+    return {
+      diff: renderSections(sections, totalChars),
+      hasChanges: true,
+      sampled: false,
+    };
+  }
+
+  // 超预算：预留统计摘要空间后按文件比例采样，避免简单截断丢失尾部变更
+  const stat = await collectStatSummary(cwd, excludeSpecs, scope);
+  const budget = Math.max(1, maxChars - stat.length - 128);
+  const sampledDiff = renderSections(sections, budget);
   return {
-    diff,
-    hasChanges: parts.length > 0,
-    truncated,
+    diff:
+      sampledDiff +
+      `\n\n[注意：变更内容过大（约 ${totalChars} 字符），以上为按文件比例采样的变更，未展示的变更见下方文件统计。]\n${stat}`,
+    hasChanges: true,
+    sampled: true,
   };
 }
 
 /** 用 `git diff --stat` 生成简短的文件级变更统计，作为超大 diff 的兜底摘要。 */
 async function collectStatSummary(
   cwd: string,
-  excludeSpecs: string[]
+  excludeSpecs: string[],
+  scope: ChangeScope
 ): Promise<string> {
+  const parts: string[] = [];
   const stagedStat = await runGit(
     cwd,
     "diff",
@@ -262,14 +466,20 @@ async function collectStatSummary(
     "--",
     ...excludeSpecs
   );
-  const unstagedStat = await runGit(cwd, "diff", "--stat", "--", ...excludeSpecs);
-
-  const parts: string[] = [];
   if (stagedStat.ok && stagedStat.stdout.trim()) {
     parts.push(`Staged:\n${stagedStat.stdout.trim()}`);
   }
-  if (unstagedStat.ok && unstagedStat.stdout.trim()) {
-    parts.push(`Unstaged:\n${unstagedStat.stdout.trim()}`);
+  if (scope === "all") {
+    const unstagedStat = await runGit(
+      cwd,
+      "diff",
+      "--stat",
+      "--",
+      ...excludeSpecs
+    );
+    if (unstagedStat.ok && unstagedStat.stdout.trim()) {
+      parts.push(`Unstaged:\n${unstagedStat.stdout.trim()}`);
+    }
   }
   return parts.join("\n\n") || "(无法获取变更统计)";
 }

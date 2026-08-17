@@ -7,6 +7,7 @@ import {
   getMaxDiffChars,
   getMaxRetries,
   getRequestTimeoutMs,
+  getChangeScope,
   MODEL_IDS,
   MODEL_LABELS,
   deleteApiKey,
@@ -251,20 +252,21 @@ async function generateCommitMessage(): Promise<void> {
     return;
   }
 
-  // 4. 收集变更（带截断上限，避免超出模型上下文）
-  const { diff, hasChanges, truncated } = await collectChanges(
+  // 4. 收集变更（默认仅暂存区；超出上限时按文件比例采样，避免超出模型上下文）
+  const { diff, hasChanges, sampled } = await collectChanges(
     cwd,
-    getMaxDiffChars()
+    getMaxDiffChars(),
+    getChangeScope()
   );
   if (!hasChanges) {
     vscode.window.showInformationMessage(
-      "当前没有 staged 或 unstaged 的变更。"
+      "当前没有可生成的变更：请先 git add 暂存修改，或调整变更范围配置（deepseekCommitMessage.changeScope）。"
     );
     return;
   }
-  if (truncated) {
+  if (sampled) {
     vscode.window.showWarningMessage(
-      "变更内容过大，已自动截断后生成，commit message 可能不够精确，建议分批提交。"
+      "变更内容过大，已按文件比例采样部分内容生成，commit message 可能不够精确，建议分批提交。"
     );
   }
 
