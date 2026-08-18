@@ -21,7 +21,6 @@ import {
 import {
   generateCommitMessage as callDeepSeek,
   DeepSeekError,
-  type GenerateResult,
 } from "./deepseek";
 import {
   collectChanges,
@@ -45,6 +44,17 @@ import {
 let usageStore: UsageStore | undefined;
 /** 状态栏累计 token 用量展示。 */
 let statusBarItem: vscode.StatusBarItem | undefined;
+
+/**
+ * 生成结果在进度通知中短暂展示的时长（毫秒），随后通知自动关闭，
+ * 无需用户手动关闭。VS Code 通知 API 不支持自动关闭，进度通知是唯一
+ * 会随异步任务结束自行消失的右下角提示。
+ */
+const RESULT_TOAST_HOLD_MS = 2000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** 将 DeepSeek 调用异常转换为友好的中文提示。 */
 function friendlyError(err: unknown): string {
@@ -270,26 +280,58 @@ async function generateCommitMessage(): Promise<void> {
     );
   }
 
-  // 5. 调用 DeepSeek 生成（可取消 + 自动重试）
+  // 5. 调用 DeepSeek 生成（可取消 + 自动重试），并在同一通知里展示结果后自动关闭
   const model = MODEL_IDS[getModel()];
   const prompt = getPrompt();
   const controller = new AbortController();
 
-  let result: GenerateResult;
+  let outcome: "invalid" | "copied" | "filled";
   try {
-    result = await vscode.window.withProgress(
+    outcome = await vscode.window.withProgress<"invalid" | "copied" | "filled">(
       {
         location: vscode.ProgressLocation.Notification,
-        title: "正在生成 commit message…（点击可取消）",
+        title: "DeepSeek Commit Message",
         cancellable: true,
       },
-      async (_progress, token) => {
+      async (progress, token) => {
         token.onCancellationRequested(() => controller.abort());
-        return await callDeepSeek(apiKey, model, prompt, diff, {
+        progress.report({ message: "正在生成 commit message…（点击可取消）" });
+
+        const result = await callDeepSeek(apiKey, model, prompt, diff, {
           timeoutMs: getRequestTimeoutMs(),
           maxRetries: getMaxRetries(),
           signal: controller.signal,
         });
+
+        // 成功响应即计入 token 用量（重试失败的消耗不估算），并刷新状态栏
+        if (result.usage && usageStore) {
+          const stats = await usageStore.add(apiKey, result.usage);
+          updateStatusBar(stats);
+        }
+
+        const clean = sanitizeCommitMessage(result.content);
+
+        // 结果兜底校验：清洗后为空或不符合规范时给出提示
+        if (!clean) {
+          return "invalid";
+        }
+
+        // 填充到 SCM 输入框；失败则兜底复制到剪贴板
+        const repoRoot = await getRepoRoot(cwd);
+        const filled = await fillScmInputBox(clean, repoRoot);
+        if (!filled) {
+          await vscode.env.clipboard.writeText(clean);
+          return "copied";
+        }
+
+        // 成功反馈：在通知里短暂展示结果后自动关闭，无需用户手动关闭
+        const extra = result.truncated ? "（模型输出可能因长度被截断）" : "";
+        progress.report({
+          message: `Commit message 已生成并填充到输入框。${extra}`,
+          increment: 100,
+        });
+        await delay(RESULT_TOAST_HOLD_MS);
+        return "filled";
       }
     );
   } catch (err) {
@@ -297,33 +339,14 @@ async function generateCommitMessage(): Promise<void> {
     return;
   }
 
-  // 5.5 累计 token 用量：成功响应即计入（重试失败的消耗不估算），并刷新状态栏
-  if (result.usage && usageStore) {
-    const stats = await usageStore.add(apiKey, result.usage);
-    updateStatusBar(stats);
-  }
-
-  const clean = sanitizeCommitMessage(result.content);
-
-  // 6. 结果兜底校验：清洗后为空或不符合规范时给出提示
-  if (!clean) {
+  if (outcome === "invalid") {
     vscode.window.showErrorMessage(
       "模型返回内容无法解析为 commit message，请重试或切换到 pro 模型。"
     );
     return;
   }
-
-  // 7. 填充到 SCM 输入框
-  const repoRoot = await getRepoRoot(cwd);
-  const filled = await fillScmInputBox(clean, repoRoot);
-  if (filled) {
-    const extra = result.truncated ? "（模型输出可能因长度被截断）" : "";
-    vscode.window.showInformationMessage(
-      `Commit message 已生成并填充到输入框。${extra}`
-    );
-  } else {
-    // 兜底：复制到剪贴板，方便手动粘贴
-    await vscode.env.clipboard.writeText(clean);
+  if (outcome === "copied") {
+    // 兜底路径需要用户手动粘贴，保留持久提示避免错过
     vscode.window.showWarningMessage(
       "无法定位 SCM 输入框，生成的 message 已复制到剪贴板。"
     );
