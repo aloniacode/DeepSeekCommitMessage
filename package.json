@@ -92,16 +92,8 @@
         },
         "deepseekCommitMessage.model": {
           "type": "string",
-          "enum": [
-            "pro",
-            "flash"
-          ],
-          "enumDescriptions": [
-            "Pro：deepseek-v4-pro，推理能力更强，适合复杂改动",
-            "Flash：deepseek-v4-flash，速度更快、成本更低，适合日常提交"
-          ],
-          "default": "flash",
-          "description": "生成 commit message 使用的 DeepSeek 模型。",
+          "default": "deepseek-v4-flash",
+          "description": "生成 commit message 使用的 DeepSeek 模型 ID。可通过 Select Model 命令从接口动态选择或手动输入任意模型 ID。",
           "order": 1
         },
         "deepseekCommitMessage.promptTemplate": {

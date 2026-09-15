@@ -29,6 +29,18 @@ interface ChatCompletionResponse {
   };
 }
 
+/** `GET /models` 返回的单个模型信息。 */
+export interface DeepSeekModel {
+  id: string;
+  object?: string;
+  owned_by?: string;
+}
+
+interface ListModelsResponse {
+  object?: string;
+  data?: DeepSeekModel[];
+}
+
 /** 生成结果：content 为文本，truncated 表示模型因 max_tokens 被截断。 */
 export interface GenerateResult {
   content: string;
@@ -110,8 +122,9 @@ export function isContextOverflow(statusCode: number | undefined, message: strin
   return /context|maximum|too long|token|exceed|过长|超出|上下文/i.test(message);
 }
 
-/** 极简的 HTTPS JSON POST 封装，避免引入第三方依赖。 */
-function postJson<T>(
+/** 极简的 HTTPS JSON 请求封装，避免引入第三方依赖。GET 不带请求体，POST 带 JSON 请求体。 */
+function requestJson<T>(
+  method: "GET" | "POST",
   url: string,
   headers: Record<string, string>,
   body: unknown,
@@ -119,17 +132,19 @@ function postJson<T>(
   signal?: AbortSignal
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    const payload = JSON.stringify(body);
+    const payload = body === undefined ? undefined : JSON.stringify(body);
     const parsed = new URL(url);
     const req = https.request(
       {
         hostname: parsed.hostname,
         port: parsed.port ? Number(parsed.port) : 443,
         path: `${parsed.pathname}${parsed.search}`,
-        method: "POST",
+        method,
         headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload),
+          ...(payload !== undefined && {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(payload),
+          }),
           ...headers,
         },
         signal,
@@ -181,9 +196,32 @@ function postJson<T>(
       }
     });
 
-    req.write(payload);
+    if (payload !== undefined) {
+      req.write(payload);
+    }
     req.end();
   });
+}
+
+/** HTTP POST JSON。 */
+function postJson<T>(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<T> {
+  return requestJson<T>("POST", url, headers, body, timeoutMs, signal);
+}
+
+/** HTTP GET JSON。 */
+function getJson<T>(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<T> {
+  return requestJson<T>("GET", url, headers, undefined, timeoutMs, signal);
 }
 
 export function isRetryableStatus(statusCode?: number): boolean {
@@ -278,4 +316,36 @@ export async function generateCommitMessage(
   }
 
   throw lastError;
+}
+
+/** 列表查询选项。 */
+export interface ListModelsOptions {
+  /** 请求超时（毫秒）。 */
+  timeoutMs?: number;
+  /** 取消信号。 */
+  signal?: AbortSignal;
+}
+
+/**
+ * 通过 `GET /models` 拉取当前可用的 DeepSeek 模型 ID 列表。
+ * 无 API Key 或接口失败时应由调用方回退到内置默认模型。
+ * @returns 模型 ID 数组（已过滤空串），可能为空。
+ */
+export async function listModels(
+  apiKey: string,
+  options?: ListModelsOptions
+): Promise<string[]> {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const signal = options?.signal;
+
+  const data = await getJson<ListModelsResponse>(
+    `${BASE_URL}/models`,
+    { Authorization: `Bearer ${apiKey}` },
+    timeoutMs,
+    signal
+  );
+
+  return (data?.data ?? [])
+    .map((m) => m?.id)
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0);
 }

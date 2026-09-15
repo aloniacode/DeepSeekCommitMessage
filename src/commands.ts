@@ -8,18 +8,18 @@ import {
   getMaxRetries,
   getRequestTimeoutMs,
   getChangeScope,
-  MODEL_IDS,
-  MODEL_LABELS,
+  DEFAULT_MODEL,
+  FALLBACK_MODELS,
   deleteApiKey,
   setApiKey as saveApiKey,
   setModel as saveModel,
   setPrompt as savePrompt,
   setPromptTemplate as savePromptTemplate,
-  type ModelId,
   type PromptTemplateId,
 } from "./configuration";
 import {
   generateCommitMessage as callDeepSeek,
+  listModels,
   DeepSeekError,
 } from "./deepseek";
 import {
@@ -114,28 +114,47 @@ async function setApiKey(): Promise<void> {
   vscode.window.showInformationMessage("DeepSeek API Key 已保存。");
 }
 
-/** 命令：选择模型。 */
+/** 命令：选择模型（优先从 `GET /models` 动态拉取，失败时回退内置默认，也可手动输入自定义模型 ID）。 */
 async function selectModel(): Promise<void> {
   const current = getModel();
+  const currentSet = new Set([current]);
+  const apiKey = await getApiKey();
+
+  // 尝试从接口拉取可用模型；无 API Key 或接口失败时回退到内置默认列表
+  let ids: string[] = [];
+  if (apiKey) {
+    try {
+      ids = await listModels(apiKey, { timeoutMs: getRequestTimeoutMs() });
+    } catch {
+      // 忽略失败，走回退
+    }
+  }
+  if (ids.length === 0) {
+    ids = [...FALLBACK_MODELS];
+  }
+
   const items: Array<{
     label: string;
-    id: ModelId;
+    id: string;
     description: string;
     picked: boolean;
-  }> = [
-    {
-      label: `${current === "pro" ? "$(check)" : "$(circle-outline)"} ${MODEL_LABELS.pro}`,
-      id: "pro",
-      description: "deepseek-v4-pro",
-      picked: current === "pro",
-    },
-    {
-      label: `${current === "flash" ? "$(check)" : "$(circle-outline)"} ${MODEL_LABELS.flash}`,
-      id: "flash",
-      description: "deepseek-v4-flash",
-      picked: current === "flash",
-    },
-  ];
+  }> = ids
+    .filter((id, index) => id && ids.indexOf(id) === index)
+    .map((id) => ({
+      label: `${currentSet.has(id) ? "$(check)" : "$(circle-outline)"} ${id}`,
+      id,
+      description: apiKey ? "DeepSeek 模型" : "内置默认模型",
+      picked: currentSet.has(id),
+    }));
+
+  // 附加手动输入任意模型 ID 的入口
+  items.push({
+    label: "$(add) 输入自定义模型 ID",
+    id: "__custom__",
+    description: "手动输入任意 DeepSeek 支持的模型 ID",
+    picked: false,
+  });
+
   const picked = await vscode.window.showQuickPick(items, {
     title: "DeepSeek Commit Message: Select Model",
     placeHolder: "选择用于生成 commit message 的模型",
@@ -144,10 +163,28 @@ async function selectModel(): Promise<void> {
   if (!picked) {
     return;
   }
-  await saveModel(picked.id);
-  vscode.window.showInformationMessage(
-    `已选择模型：${picked.id === "pro" ? "Pro" : "Flash"}（${picked.description}）`
-  );
+
+  let finalId = picked.id;
+  if (picked.id === "__custom__") {
+    const value = await vscode.window.showInputBox({
+      title: "DeepSeek Commit Message: Select Model",
+      prompt: "输入模型 ID（例如 deepseek-v4-pro）",
+      placeHolder: DEFAULT_MODEL,
+      value: currentSet.has(current) ? current : "",
+      ignoreFocusOut: true,
+    });
+    if (value === undefined) {
+      return;
+    }
+    finalId = value.trim();
+    if (!finalId) {
+      vscode.window.showWarningMessage("模型 ID 不能为空。");
+      return;
+    }
+  }
+
+  await saveModel(finalId);
+  vscode.window.showInformationMessage(`已选择模型：${finalId}`);
 }
 
 /** 命令：设置提示词。 */
@@ -281,7 +318,7 @@ async function generateCommitMessage(): Promise<void> {
   }
 
   // 5. 调用 DeepSeek 生成（可取消 + 自动重试），并在同一通知里展示结果后自动关闭
-  const model = MODEL_IDS[getModel()];
+  const model = getModel();
   const prompt = getPrompt();
   const controller = new AbortController();
 
@@ -393,7 +430,7 @@ async function showTokenUsage(): Promise<void> {
     return;
   }
   vscode.window.showInformationMessage(
-    formatUsageSummary(stats, MODEL_LABELS[getModel()])
+    formatUsageSummary(stats, getModel())
   );
 }
 

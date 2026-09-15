@@ -9,19 +9,19 @@ const API_KEY_SECRET = "deepseekCommitMessage.apiKey";
 /** 由 extension.activate 注入的 SecretStorage 实例。 */
 let secretStorage: vscode.SecretStorage | undefined;
 
-/** 可选模型标识。 */
-export type ModelId = "pro" | "flash";
+/** 默认模型 ID（用于首次使用与离线回退）。 */
+export const DEFAULT_MODEL = "deepseek-v4-flash";
 
-/** 模型标识 -> DeepSeek API 实际模型名映射。 */
-export const MODEL_IDS: Record<ModelId, string> = {
+/** 内置默认模型列表：当 `GET /models` 接口不可用（无 API Key / 网络失败）时的兜底选项。 */
+export const FALLBACK_MODELS: readonly string[] = [
+  "deepseek-v4-pro",
+  "deepseek-v4-flash",
+];
+
+/** 旧版本配置值（pro / flash）到完整模型 ID 的迁移映射。 */
+const LEGACY_MODEL_IDS: Record<string, string> = {
   pro: "deepseek-v4-pro",
   flash: "deepseek-v4-flash",
-};
-
-/** 模型选择下拉框的展示文案。 */
-export const MODEL_LABELS: Record<ModelId, string> = {
-  pro: "Pro（deepseek-v4-pro · 推理更强）",
-  flash: "Flash（deepseek-v4-flash · 更快更省）",
 };
 
 /** 预设提示词模板标识。 */
@@ -114,10 +114,13 @@ export async function getApiKey(): Promise<string> {
   return legacy;
 }
 
-/** 读取当前选择的模型标识。 */
-export function getModel(): ModelId {
-  const value = getConfig().get<string>("model", "flash");
-  return value === "pro" ? "pro" : "flash";
+/** 读取当前选择的模型 ID。旧版本存的 pro / flash 会迁移为完整模型 ID；非法值回退默认。 */
+export function getModel(): string {
+  const value = getConfig().get<string>("model", DEFAULT_MODEL).trim();
+  if (!value) {
+    return DEFAULT_MODEL;
+  }
+  return LEGACY_MODEL_IDS[value] ?? value;
 }
 
 /** 读取当前选择的提示词模板标识。 */
@@ -152,9 +155,13 @@ export async function deleteApiKey(): Promise<void> {
   await getConfig().update("apiKey", "", vscode.ConfigurationTarget.Global);
 }
 
-/** 将模型写入配置。 */
-export async function setModel(model: ModelId): Promise<void> {
-  await getConfig().update("model", model, vscode.ConfigurationTarget.Global);
+/** 将模型 ID 写入配置。 */
+export async function setModel(model: string): Promise<void> {
+  const id = (model ?? "").trim();
+  if (!id) {
+    throw new Error("模型 ID 不能为空。");
+  }
+  await getConfig().update("model", id, vscode.ConfigurationTarget.Global);
 }
 
 /** 将提示词模板写入配置。 */

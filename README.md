@@ -18,7 +18,7 @@
 - ⚙️ 可视化配置：模型、提示词模板均可在 VSCode 设置面板中配置。
 - 🔐 安全存储：API Key 通过命令保存到系统凭据库（SecretStorage），不落盘到 `settings.json`。
 - 🧩 预设模板：内置英文 / 中文两套 Conventional Commits 提示词，也支持自定义。
-- 🧠 双模型：支持 `pro`（deepseek-v4-pro）与 `flash`（deepseek-v4-flash）。
+- 🧠 动态模型：通过 DeepSeek `GET /models` 接口拉取可用模型列表，接口不可用时回退到内置默认（deepseek-v4-pro / deepseek-v4-flash），也支持手动输入任意模型 ID。
 - 📊 用量统计：累计记录每次成功生成的 token 用量（prompt / completion / reasoning），状态栏常驻显示，命令可查看明细。
 
 ## 快速开始
@@ -36,7 +36,7 @@
 | --- | --- |
 | `DeepSeek Commit Message: Set API Key` | 设置 DeepSeek API Key |
 | `DeepSeek Commit Message: Clear API Key` | 清除已保存的 API Key |
-| `DeepSeek Commit Message: Select Model` | 选择 pro / flash 模型 |
+| `DeepSeek Commit Message: Select Model` | 从接口动态选择或手动输入模型 ID |
 | `DeepSeek Commit Message: Set Prompt` | 选择/自定义提示词模板 |
 | `DeepSeek Commit Message: Generate Commit Message` | 生成 commit message 并填充到 SCM 输入框 |
 | `DeepSeek Commit Message: Show Token Usage` | 查看累计 token 用量（状态栏也可点击查看） |
@@ -46,7 +46,7 @@
 
 | 配置键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `deepseekCommitMessage.model` | enum | `flash` | `pro` / `flash` |
+| `deepseekCommitMessage.model` | string | `deepseek-v4-flash` | 任何 DeepSeek 支持的模型 ID |
 | `deepseekCommitMessage.promptTemplate` | enum | `conventional` | `conventional` / `conventional-zh` / `custom` |
 | `deepseekCommitMessage.prompt` | string | `""` | 自定义提示词（`custom` 模板时生效） |
 | `deepseekCommitMessage.requestTimeout` | number | `120000` | 请求超时（毫秒） |
@@ -66,4 +66,4 @@
   并附加全量文件统计，保证既不超模型上下文、又不丢失尾部变更。仍建议大改动分批提交。
 - **API Key 存在哪里？** 通过 `Set API Key` 命令保存在系统凭据库（SecretStorage），不写入 `settings.json`。
 - **如何更换或清除 API Key？** 执行 `DeepSeek Commit Message: Clear API Key` 清除后再重新设置。
-- **选了中文模板仍是英文？** 请通过 `Select Model` 切到 `pro`（推理更强、约束遵循更稳），或重新点击生成一次。
+- **选了中文模板仍是英文？** 请通过 `Select Model` 切到 `deepseek-v4-pro`（推理更强、约束遵循更稳），或重新点击生成一次。

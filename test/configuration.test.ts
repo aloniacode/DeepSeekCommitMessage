@@ -7,10 +7,14 @@ import {
   getMaxRetries,
   getMaxDiffChars,
   getChangeScope,
+  getModel,
+  setModel,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
   DEFAULT_MAX_DIFF_CHARS,
   DEFAULT_CHANGE_SCOPE,
+  DEFAULT_MODEL,
+  FALLBACK_MODELS,
 } from "../src/configuration";
 
 function mockConfig(values: Record<string, unknown>): void {
@@ -19,6 +23,63 @@ function mockConfig(values: Record<string, unknown>): void {
   );
   vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({ get } as never);
 }
+
+describe("模型配置", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("未配置时返回默认模型 ID", () => {
+    mockConfig({});
+    expect(getModel()).toBe(DEFAULT_MODEL);
+  });
+
+  it("读取自定义模型 ID", () => {
+    mockConfig({ model: "deepseek-reasoner" });
+    expect(getModel()).toBe("deepseek-reasoner");
+  });
+
+  it("旧版本 pro / flash 迁移到完整模型 ID", () => {
+    mockConfig({ model: "pro" });
+    expect(getModel()).toBe("deepseek-v4-pro");
+    mockConfig({ model: "flash" });
+    expect(getModel()).toBe("deepseek-v4-flash");
+  });
+
+  it("空白模型值回退默认", () => {
+    mockConfig({ model: "   " });
+    expect(getModel()).toBe(DEFAULT_MODEL);
+  });
+
+  it("FALLBACK_MODELS 提供内置默认列表，供接口不可用时兜底", () => {
+    expect(FALLBACK_MODELS).toContain("deepseek-v4-pro");
+    expect(FALLBACK_MODELS).toContain("deepseek-v4-flash");
+  });
+
+  it("setModel 去空白写入", async () => {
+    const update = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({
+      get: vi.fn(),
+      update,
+    } as never);
+    await setModel("  deepseek-v4-pro  ");
+    expect(update).toHaveBeenCalledWith(
+      "model",
+      "deepseek-v4-pro",
+      vscode.ConfigurationTarget.Global
+    );
+  });
+
+  it("setModel 空值抛错", async () => {
+    const update = vi.fn();
+    vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({
+      get: vi.fn(),
+      update,
+    } as never);
+    await expect(setModel("   ")).rejects.toThrow("模型 ID 不能为空");
+    expect(update).not.toHaveBeenCalled();
+  });
+});
 
 describe("配置读取", () => {
   beforeEach(() => {
